@@ -84,4 +84,4 @@ MIT License
 
 ## Acknowledgments
 
-Built with ❤️ using [Streamlit](https://streamlit.io/) and powered by [MorphZ]((https://pypi.org/project/morphZ/))
+Built with ❤️ using [Streamlit](https://streamlit.io/) and powered by [MorphZ](https://pypi.org/project/morphZ/)
