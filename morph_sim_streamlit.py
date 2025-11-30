@@ -10,6 +10,7 @@ import morphZ as mz
 import json
 import os
 import shutil
+import math
 
 class TunableCopulaSimulation:
     def __init__(self, seed=None):
@@ -22,6 +23,15 @@ class TunableCopulaSimulation:
         self.marginals = []
         
         # Metadata for naming
+        self.var_names = [] 
+        self._type_counters = {}
+
+    def reset(self):
+        """Resets the simulation state."""
+        self.factors = []      
+        self.total_dim = 0
+        self.full_corr = None
+        self.marginals = []
         self.var_names = [] 
         self._type_counters = {}
 
@@ -118,6 +128,61 @@ class TunableCopulaSimulation:
         
         return f"Added Factor [{dist_name}]: {dim} vars | Strength={corr_strength if corr_strength is not None else 'Random'}"
 
+    def generate_random_problem(self, target_dim):
+        """
+        Automatically generates a random high-dimensional problem.
+        It partitions the target_dim into random blocks and assigns random distributions and parameters.
+        """
+        self.reset()
+        available_dists = ['norm', 'gamma', 'beta', 'lognorm', 'expon', 'uniform']
+        
+        remaining_dim = target_dim
+        logs = []
+
+        while remaining_dim > 0:
+            # Determine block size (random between 1 and remaining, capped at 5 for variety)
+            max_block = min(remaining_dim, 5)
+            block_dim = np.random.randint(1, max_block + 1) if max_block > 1 else 1
+            
+            # Pick a distribution
+            dist_name = np.random.choice(available_dists)
+            
+            # Pick correlation strength (randomly either None or a float)
+            use_corr = np.random.choice([True, False])
+            corr_strength = np.random.uniform(0.1, 0.9) if use_corr else None
+            
+            # Generate Random Params
+            params = []
+            for _ in range(block_dim):
+                p = {}
+                if dist_name == 'norm':
+                    p['loc'] = np.random.uniform(-5, 5)
+                    p['scale'] = np.random.uniform(0.5, 3.0)
+                elif dist_name == 'gamma':
+                    p['a'] = np.random.uniform(1.0, 5.0)
+                    p['scale'] = np.random.uniform(0.5, 2.0)
+                elif dist_name == 'beta':
+                    p['a'] = np.random.uniform(1.0, 5.0)
+                    p['b'] = np.random.uniform(1.0, 5.0)
+                elif dist_name == 'lognorm':
+                    p['s'] = np.random.uniform(0.5, 1.0) # shape
+                    p['scale'] = np.exp(np.random.uniform(0, 1)) # scale
+                elif dist_name == 'expon':
+                    p['scale'] = np.random.uniform(0.5, 3.0)
+                elif dist_name == 'uniform':
+                    start = np.random.uniform(-5, 5)
+                    width = np.random.uniform(1, 10)
+                    p['loc'] = start
+                    p['scale'] = width
+                params.append(p)
+            
+            # Add the factor
+            msg = self.add_factor(dist_name, params, block_dim, corr_strength)
+            logs.append(msg)
+            remaining_dim -= block_dim
+            
+        return logs
+
     def get_param_names(self):
         return self.var_names
 
@@ -160,7 +225,15 @@ class TunableCopulaSimulation:
         
         # Marginal Log Likelihoods
         for i, dist in enumerate(self.marginals):
-            log_marginals += dist.logpdf(x[:, i])
+            # Calculate the logpdf for marginals
+            marginal_logpdfs = dist.logpdf(x[:, i])
+            
+            # --- FIX: Replace -inf and nan with a large finite negative number ---
+            # This is the critical line to prevent the ValueError
+            marginal_logpdfs = np.nan_to_num(marginal_logpdfs, neginf=-1e10) 
+            # -------------------------------------------------------------------
+            
+            log_marginals += marginal_logpdfs
             u_vals[:, i] = dist.cdf(x[:, i])
 
         # Copula Log Likelihood
@@ -170,17 +243,14 @@ class TunableCopulaSimulation:
         log_pdf_mvn = mvn.logpdf(z_vals)
         log_pdf_indep = np.sum(stats.norm.logpdf(z_vals), axis=1)
         
-        return (log_pdf_mvn - log_pdf_indep) + log_marginals
+        final_logpdf = (log_pdf_mvn - log_pdf_indep) + log_marginals
+        
+        return final_logpdf
 
 
 def compute_kl_divergence(original_logpdf, morph_logpdf):
     """
     Compute KL divergence D_KL(Original || Morph) using Monte Carlo estimation.
-    KL(P||Q) = E_P[log(P/Q)] = E_P[log P - log Q]
-    
-    Returns:
-        kl_forward: D_KL(Original || Morph) - can be negative due to MC estimation
-        kl_std: Standard error of the estimate
     """
     # Forward KL: samples from original distribution
     log_ratio = original_logpdf - morph_logpdf
@@ -204,77 +274,108 @@ if 'sim' not in st.session_state:
     st.session_state.logpdf_values = None
     st.session_state.morph_data = {}
     st.session_state.kl_results = {}
+    st.session_state.morph_logpdf_on_original = {} # Store LogPDFs for the new tab
 
-# Sidebar - Factor Configuration
-st.sidebar.header("⚙️ Add New Factor")
+# Sidebar Configuration Mode
+st.sidebar.header("⚙️ Configuration")
+setup_mode = st.sidebar.radio("Setup Mode", ["Manual Construction", "Random Auto-Generation"])
 
-dist_name = st.sidebar.selectbox(
-    "Distribution Type",
-    ['norm', 'gamma', 'beta', 'lognorm', 'expon', 'uniform', 'loguniform']
-)
+st.sidebar.markdown("---")
 
-dim = st.sidebar.number_input("Dimension", min_value=1, max_value=10, value=2)
-
-corr_strength_type = st.sidebar.radio(
-    "Correlation Strength",
-    ["Specified", "Random"]
-)
-
-if corr_strength_type == "Specified":
-    corr_strength = st.sidebar.slider("Strength", 0.0, 0.99, 0.5, 0.01)
-else:
-    corr_strength = None
-
-# Parameter inputs based on distribution
-st.sidebar.subheader(f"Parameters for {dim} variables")
-
-params = []
-for i in range(dim):
-    st.sidebar.markdown(f"**Variable {i+1}**")
+if setup_mode == "Random Auto-Generation":
+    st.sidebar.subheader("🎲 Auto-Generate Problem")
+    target_dims = st.sidebar.number_input("Total Dimensions", min_value=2, max_value=100, value=10, step=1)
     
-    if dist_name == 'norm':
-        loc = st.sidebar.number_input(f"loc (mean) #{i+1}", value=0.0, key=f"norm_loc_{i}")
-        scale = st.sidebar.number_input(f"scale (std) #{i+1}", value=1.0, min_value=0.01, key=f"norm_scale_{i}")
-        params.append({'loc': loc, 'scale': scale})
-        
-    elif dist_name == 'gamma':
-        a = st.sidebar.number_input(f"a (shape) #{i+1}", value=2.0, min_value=0.01, key=f"gamma_a_{i}")
-        params.append({'a': a})
-        
-    elif dist_name == 'beta':
-        a = st.sidebar.number_input(f"a (alpha) #{i+1}", value=2.0, min_value=0.01, key=f"beta_a_{i}")
-        b = st.sidebar.number_input(f"b (beta) #{i+1}", value=2.0, min_value=0.01, key=f"beta_b_{i}")
-        params.append({'a': a, 'b': b})
-        
-    elif dist_name == 'lognorm':
-        s = st.sidebar.number_input(f"s (shape) #{i+1}", value=1.0, min_value=0.01, key=f"lognorm_s_{i}")
-        loc = st.sidebar.number_input(f"loc #{i+1}", value=0.0, key=f"lognorm_loc_{i}")
-        params.append({'s': s, 'loc': loc})
-        
-    elif dist_name == 'expon':
-        scale = st.sidebar.number_input(f"scale #{i+1}", value=1.0, min_value=0.01, key=f"expon_scale_{i}")
-        params.append({'scale': scale})
-        
-    elif dist_name == 'uniform':
-        loc = st.sidebar.number_input(f"loc (lower bound) #{i+1}", value=0.0, key=f"uniform_loc_{i}")
-        scale = st.sidebar.number_input(f"scale (range) #{i+1}", value=1.0, min_value=0.01, key=f"uniform_scale_{i}")
-        params.append({'loc': loc, 'scale': scale})
-        
-    elif dist_name == 'loguniform':
-        a = st.sidebar.number_input(f"a (lower bound) #{i+1}", value=0.01, min_value=1e-10, key=f"loguniform_a_{i}")
-        b = st.sidebar.number_input(f"b (upper bound) #{i+1}", value=1.0, min_value=1e-10, key=f"loguniform_b_{i}")
-        if a >= b:
-            st.sidebar.error(f"Variable {i+1}: a must be < b")
-        params.append({'a': a, 'b': b})
+    if st.sidebar.button("⚡ Generate Random Problem"):
+        try:
+            # Clear previous state
+            st.session_state.factors_added = []
+            st.session_state.data = None
+            st.session_state.logpdf_values = None
+            st.session_state.morph_data = {}
+            st.session_state.kl_results = {}
+            st.session_state.morph_logpdf_on_original = {}
+            
+            # Generate
+            logs = st.session_state.sim.generate_random_problem(target_dims)
+            st.session_state.factors_added = logs
+            st.success(f"Generated {target_dims}-dimensional problem with {len(logs)} factors!")
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error: {e}")
 
-if st.sidebar.button("➕ Add Factor"):
-    try:
-        msg = st.session_state.sim.add_factor(dist_name, params, dim, corr_strength)
-        st.session_state.factors_added.append(msg)
-        st.sidebar.success(msg)
-    except Exception as e:
-        st.sidebar.error(f"Error: {e}")
+else:
+    # MANUAL MODE
+    st.sidebar.subheader("🛠️ Add Factor Manually")
+    
+    dist_name = st.sidebar.selectbox(
+        "Distribution Type",
+        ['norm', 'gamma', 'beta', 'lognorm', 'expon', 'uniform', 'loguniform']
+    )
 
+    dim = st.sidebar.number_input("Dimension", min_value=1, max_value=10, value=2)
+
+    corr_strength_type = st.sidebar.radio(
+        "Correlation Strength",
+        ["Specified", "Random"]
+    )
+
+    if corr_strength_type == "Specified":
+        corr_strength = st.sidebar.slider("Strength", 0.0, 0.99, 0.5, 0.01)
+    else:
+        corr_strength = None
+
+    # Parameter inputs based on distribution
+    st.sidebar.markdown(f"**Parameters for {dim} variables**")
+
+    params = []
+    for i in range(dim):
+        st.sidebar.markdown(f"**Variable {i+1}**")
+        
+        if dist_name == 'norm':
+            loc = st.sidebar.number_input(f"loc (mean) #{i+1}", value=0.0, key=f"norm_loc_{i}")
+            scale = st.sidebar.number_input(f"scale (std) #{i+1}", value=1.0, min_value=0.01, key=f"norm_scale_{i}")
+            params.append({'loc': loc, 'scale': scale})
+            
+        elif dist_name == 'gamma':
+            a = st.sidebar.number_input(f"a (shape) #{i+1}", value=2.0, min_value=0.01, key=f"gamma_a_{i}")
+            params.append({'a': a})
+            
+        elif dist_name == 'beta':
+            a = st.sidebar.number_input(f"a (alpha) #{i+1}", value=2.0, min_value=0.01, key=f"beta_a_{i}")
+            b = st.sidebar.number_input(f"b (beta) #{i+1}", value=2.0, min_value=0.01, key=f"beta_b_{i}")
+            params.append({'a': a, 'b': b})
+            
+        elif dist_name == 'lognorm':
+            s = st.sidebar.number_input(f"s (shape) #{i+1}", value=1.0, min_value=0.01, key=f"lognorm_s_{i}")
+            loc = st.sidebar.number_input(f"loc #{i+1}", value=0.0, key=f"lognorm_loc_{i}")
+            params.append({'s': s, 'loc': loc})
+            
+        elif dist_name == 'expon':
+            scale = st.sidebar.number_input(f"scale #{i+1}", value=1.0, min_value=0.01, key=f"expon_scale_{i}")
+            params.append({'scale': scale})
+            
+        elif dist_name == 'uniform':
+            loc = st.sidebar.number_input(f"loc (lower bound) #{i+1}", value=0.0, key=f"uniform_loc_{i}")
+            scale = st.sidebar.number_input(f"scale (range) #{i+1}", value=1.0, min_value=0.01, key=f"uniform_scale_{i}")
+            params.append({'loc': loc, 'scale': scale})
+            
+        elif dist_name == 'loguniform':
+            a = st.sidebar.number_input(f"a (lower bound) #{i+1}", value=0.01, min_value=1e-10, key=f"loguniform_a_{i}")
+            b = st.sidebar.number_input(f"b (upper bound) #{i+1}", value=1.0, min_value=1e-10, key=f"loguniform_b_{i}")
+            if a >= b:
+                st.sidebar.error(f"Variable {i+1}: a must be < b")
+            params.append({'a': a, 'b': b})
+
+    if st.sidebar.button("➕ Add Factor"):
+        try:
+            msg = st.session_state.sim.add_factor(dist_name, params, dim, corr_strength)
+            st.session_state.factors_added.append(msg)
+            st.sidebar.success(msg)
+        except Exception as e:
+            st.sidebar.error(f"Error: {e}")
+
+st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Reset Simulation"):
     st.session_state.sim = TunableCopulaSimulation(seed=42)
     st.session_state.factors_added = []
@@ -282,7 +383,9 @@ if st.sidebar.button("🔄 Reset Simulation"):
     st.session_state.logpdf_values = None
     st.session_state.morph_data = {}
     st.session_state.kl_results = {}
+    st.session_state.morph_logpdf_on_original = {}
     st.sidebar.success("Simulation reset!")
+    st.rerun()
 
 # Main area
 col1, col2 = st.columns([1, 2])
@@ -290,11 +393,12 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.subheader("📋 Current Configuration")
     if st.session_state.factors_added:
-        for msg in st.session_state.factors_added:
-            st.text(msg)
-        st.metric("Total Dimensions", st.session_state.sim.total_dim)
+        st.write(f"**Total Dimensions:** {st.session_state.sim.total_dim}")
+        with st.expander("See Factor Details", expanded=True):
+            for msg in st.session_state.factors_added:
+                st.text(msg)
     else:
-        st.info("No factors added yet. Add factors from the sidebar.")
+        st.info("No factors added yet. Use the sidebar to configure.")
 
 with col2:
     st.subheader("🎲 Sample & Analyze")
@@ -311,6 +415,7 @@ with col2:
                 st.session_state.logpdf_values = st.session_state.sim.logpdf(st.session_state.data)
                 st.session_state.morph_data = {}
                 st.session_state.kl_results = {}
+                st.session_state.morph_logpdf_on_original = {} # Reset
             st.success(f"Generated {n_samples} samples!")
 
 # Display results
@@ -319,7 +424,15 @@ if st.session_state.data is not None:
     logpdf_values = st.session_state.logpdf_values
     param_names = st.session_state.sim.get_param_names()
     
-    tabs = st.tabs(["📊 Correlations", "📈 Log PDF", "🔥 Covariance", "🎯 MorphZ Analysis", "📉 KL Divergence"])
+    # Tabs list
+    tabs = st.tabs([
+        "📊 Correlations", 
+        "📈 Log PDF", 
+        "🎯 MorphZ Analysis", 
+        "🔥 Correlation vs MI", 
+        "📉 KL Divergence",
+        "✅ Acceptance Ratio"
+    ])
     
     # Tab 1: Correlation Heatmap
     with tabs[0]:
@@ -329,8 +442,8 @@ if st.session_state.data is not None:
         
         fig, ax = plt.subplots(figsize=(10, 8))
         mask = np.triu(np.ones_like(corr_obs, dtype=bool))
-        sns.heatmap(corr_obs, mask=mask, annot=True, fmt=".2f", cmap='coolwarm', 
-                    vmin=-1, vmax=1, ax=ax)
+        sns.heatmap(corr_obs, mask=mask, annot=False, cmap='coolwarm', 
+                    vmin=-1, vmax=1, ax=ax) 
         ax.set_title("Recovered Correlation Matrix from Samples")
         st.pyplot(fig)
         plt.close()
@@ -338,34 +451,25 @@ if st.session_state.data is not None:
     # Tab 2: Log PDF
     with tabs[1]:
         st.subheader("Log PDF Distribution")
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.hist(logpdf_values, bins=30, color='skyblue', edgecolor='black')
-        ax.set_title("Histogram of Log PDF Values for Samples")
-        ax.set_xlabel("Log PDF")
-        ax.set_ylabel("Frequency")
-        st.pyplot(fig)
-        plt.close()
         
-        st.metric("Mean Log PDF", f"{np.mean(logpdf_values):.4f}")
-        st.metric("Std Log PDF", f"{np.std(logpdf_values):.4f}")
+        # Ensure finite values for plotting range
+        finite_logpdf = logpdf_values[np.isfinite(logpdf_values)]
+        if len(finite_logpdf) == 0:
+            st.warning("All Log PDF values are non-finite (outside distribution support). Check configuration.")
+        else:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.hist(finite_logpdf, bins=30, color='skyblue', edgecolor='black')
+            ax.set_title("Histogram of Log PDF Values for Samples")
+            ax.set_xlabel("Log PDF")
+            ax.set_ylabel("Frequency")
+            st.pyplot(fig)
+            plt.close()
+            
+            st.metric("Mean Log PDF", f"{np.mean(finite_logpdf):.4f}")
+            st.metric("Std Log PDF", f"{np.std(finite_logpdf):.4f}")
     
-    # Tab 3: Covariance
+    # Tab 3: MorphZ Analysis
     with tabs[2]:
-        st.subheader("Empirical Covariance Matrix")
-        fig, ax = plt.subplots(figsize=(10, 8))
-        cov_matrix = np.cov(data, rowvar=False)
-        im = ax.imshow(cov_matrix, cmap='plasma')
-        ax.set_xticks(np.arange(len(param_names)))
-        ax.set_yticks(np.arange(len(param_names)))
-        ax.set_xticklabels(param_names, rotation=90)
-        ax.set_yticklabels(param_names)
-        plt.colorbar(im, ax=ax)
-        ax.set_title("Empirical Covariance Matrix from Samples")
-        st.pyplot(fig)
-        plt.close()
-    
-    # Tab 4: MorphZ Analysis
-    with tabs[3]:
         st.subheader("MorphZ Morphing Analysis")
         
         col_a, col_b = st.columns(2)
@@ -373,7 +477,7 @@ if st.session_state.data is not None:
             morph_orders = st.multiselect(
                 "Select Morph Orders",
                 [2, 3, 4, 5, 6],
-                default=[2, 3, 4]
+                default=[2, 3]
             )
         with col_b:
             n_morph_samples = st.number_input("Samples per Morph", 1000, 10000, 4000, 500)
@@ -382,7 +486,7 @@ if st.session_state.data is not None:
         remove_existing = st.checkbox(
             "🗑️ Remove existing output directory before analysis",
             value=True,
-            help="If enabled, deletes the output folder before running to ensure clean results. Disable to reuse existing transformation files."
+            help="If enabled, deletes the output folder before running to ensure clean results."
         )
         
         if st.button("🧬 Run MorphZ Analysis"):
@@ -402,17 +506,18 @@ if st.session_state.data is not None:
                     
                     os.makedirs(output_dir, exist_ok=True)
                     
-                    if remove_existing:
-                        st.success(f"📁 Created fresh output directory: {output_dir}")
-                    elif os.path.exists(output_dir):
-                        st.info(f"📂 Using existing output directory: {output_dir}")
-                    
                     # Compute TC for each order
                     morph_data = {}
                     kl_results = {}
+                    morph_logpdf_on_original = {} 
                     
                     for order in morph_orders:
                         try:
+                            # Show block count info
+                            n_dim = len(param_names)
+                            n_blocks = math.comb(n_dim, order)
+                            st.info(f"⏳ Computing Total correlation for {n_blocks} blocks ({n_dim} choose {order})...")
+
                             # Use mz.evidence to compute and save
                             try:
                                 m = mz.evidence(
@@ -425,9 +530,10 @@ if st.session_state.data is not None:
                                     param_names=param_names,
                                     output_path=output_dir
                                 )
+                                st.success(f"✅ Successfully computed Morph approx. for order {order}!")
                             except Exception as e:
                                 # Continue on error in evidence computation
-                                st.success(f"✅ Successfully computed Morph approx. for order {order}!")
+                                print(f"⚠️ Warning during mz.evidence for order {order}: {e}")
 
                             
                             # Load and resample - this is the critical part
@@ -441,21 +547,25 @@ if st.session_state.data is not None:
                             # Compute log PDFs for morph samples under morph distribution
                             morph_logpdf_morph = morph_kde.logpdf(morph_samples.T)
                             
+                            # --- NEW EVALUATION STEP ---
+                            # Evaluate the morph samples at the ORIGINAL logpdf function
+                            original_logpdf_at_morph_samples = st.session_state.sim.logpdf(morph_samples)
+                            morph_logpdf_on_original[order] = original_logpdf_at_morph_samples.flatten()
+                            # ---------------------------
+                            
                             morph_data[order] = {
                                 'samples': morph_samples,
                                 'logpdf': morph_logpdf_morph
                             }
                             
                             # Compute KL divergence: D_KL(Original || Morph)
-                            # Evaluate morph KDE on original data samples
-                            # morph_kde.logpdf expects shape (n_dims, n_samples)
-                            morph_logpdf_on_original = morph_kde.logpdf(data.T)
+                            morph_logpdf_on_original_kl = morph_kde.logpdf(data.T)
                             
                             # Ensure both arrays are 1D
-                            if isinstance(morph_logpdf_on_original, np.ndarray):
-                                morph_logpdf_on_original = morph_logpdf_on_original.flatten()
+                            if isinstance(morph_logpdf_on_original_kl, np.ndarray):
+                                morph_logpdf_on_original_kl = morph_logpdf_on_original_kl.flatten()
                             
-                            kl_div, kl_std = compute_kl_divergence(logpdf_values, morph_logpdf_on_original)
+                            kl_div, kl_std = compute_kl_divergence(logpdf_values, morph_logpdf_on_original_kl)
                             
                             kl_results[order] = {
                                 'kl': kl_div,
@@ -472,6 +582,7 @@ if st.session_state.data is not None:
                     # Store in session state
                     st.session_state.morph_data = morph_data
                     st.session_state.kl_results = kl_results
+                    st.session_state.morph_logpdf_on_original = morph_logpdf_on_original # Store new results
                 
                 # Show results section
                 st.markdown("---")
@@ -487,10 +598,18 @@ if st.session_state.data is not None:
                     colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink']
                     
                     try:
+                        # Only plot first 5 dimensions if total dim is huge
+                        plot_dims = min(5, st.session_state.sim.total_dim)
+                        plot_indices = list(range(plot_dims))
+                        
                         with st.spinner("Generating corner plot..."):
+                            # Filter data for plot
+                            data_plot = data[:, :plot_dims]
+                            labels_plot = param_names[:plot_dims]
+                            
                             fig = corner.corner(
-                                data, 
-                                labels=param_names, 
+                                data_plot, 
+                                labels=labels_plot, 
                                 color='blue',
                                 hist_kwargs={"density": True},
                                 show_titles=True, 
@@ -498,9 +617,10 @@ if st.session_state.data is not None:
                             )
                             
                             for idx, (order, mdata) in enumerate(st.session_state.morph_data.items()):
+                                m_samples_plot = mdata['samples'][:, :plot_dims]
                                 corner.corner(
-                                    mdata['samples'],
-                                    labels=param_names,
+                                    m_samples_plot,
+                                    labels=labels_plot,
                                     fig=fig,
                                     color=colors[idx % len(colors)],
                                     hist_kwargs={"density": True},
@@ -519,6 +639,8 @@ if st.session_state.data is not None:
                             )
                             
                             st.pyplot(fig)
+                            if st.session_state.sim.total_dim > 5:
+                                st.caption("Note: Only showing first 5 dimensions for clarity.")
                             plt.close()
                     except Exception as e:
                         st.error(f"Error generating corner plot: {e}")
@@ -526,15 +648,21 @@ if st.session_state.data is not None:
                     # Log PDF comparison
                     st.subheader("Log PDF Comparison")
                     try:
+                        # Filter out non-finite LogPDFs for plotting
+                        finite_logpdf_values = logpdf_values[np.isfinite(logpdf_values)]
+                        
                         fig, ax = plt.subplots(figsize=(10, 6))
                         
-                        ax.hist(logpdf_values - np.mean(logpdf_values), 
+                        ax.hist(finite_logpdf_values - np.mean(finite_logpdf_values), 
                                density=True, bins=30, color='blue', 
                                alpha=0.8, label='Original')
                         
                         for idx, (order, mdata) in enumerate(st.session_state.morph_data.items()):
                             morph_logpdf = mdata['logpdf']
-                            ax.hist(morph_logpdf - morph_logpdf.mean(),
+                            # Filter out non-finite LogPDFs for plotting
+                            finite_morph_logpdf = morph_logpdf[np.isfinite(morph_logpdf)]
+                            
+                            ax.hist(finite_morph_logpdf - finite_morph_logpdf.mean(),
                                    density=True, bins=30, 
                                    color=colors[idx % len(colors)],
                                    alpha=0.4, label=f'Morph {order}')
@@ -547,6 +675,39 @@ if st.session_state.data is not None:
                         plt.close()
                     except Exception as e:
                         st.error(f"Error generating log PDF plot: {e}")
+
+    # Tab 4: Correlation vs MI
+    with tabs[3]:
+        st.subheader("Pearson Correlation vs Mutual Information")
+        
+        # Check if output directory and MI plot exist
+        output_dir = f"{len(param_names)}_d"
+        mi_plot_path = f"{output_dir}/mi_heatmap.png"
+        
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.markdown("##### Pearson Correlation (Computed)")
+            # Re-plot Pearson Correlation
+            df = pd.DataFrame(data, columns=param_names)
+            corr_obs = df.corr()
+            
+            fig, ax = plt.subplots(figsize=(10, 8))
+            mask = np.triu(np.ones_like(corr_obs, dtype=bool))
+            sns.heatmap(corr_obs, mask=mask, annot=False, cmap='coolwarm', 
+                        vmin=-1, vmax=1, ax=ax)
+            ax.set_title("Pearson Correlation")
+            st.pyplot(fig)
+            plt.close()
+        
+        with c2:
+            st.markdown("##### Mutual Information (MorphZ)")
+            if os.path.exists(mi_plot_path):
+                st.image(mi_plot_path, caption=f"Mutual Information Heatmap ({mi_plot_path})", use_container_width=True)
+            else:
+                st.info("⚠️ Mutual Information heatmap not found.")
+                st.warning("Please run the **MorphZ Analysis** in the previous tab to generate the MI plot.")
+                st.code(f"Expected Path: {mi_plot_path}")
     
     # Tab 5: KL Divergence
     with tabs[4]:
@@ -611,16 +772,6 @@ if st.session_state.data is not None:
             st.pyplot(fig)
             plt.close()
             
-            # Additional info box
-            st.info("""
-            **Understanding KL Divergence Values:**
-            - **Theoretical:** D_KL(P||Q) ≥ 0 always
-            - **Monte Carlo Estimate:** Can be negative with finite samples due to estimation variance
-            - **Negative values:** Often indicate very good approximation (close to 0) with estimation noise
-            - **Error bars:** Show ±1 standard error; wider bars = less reliable estimate
-            - **Practical interpretation:** Compare relative values; lower is better
-            """)
-            
             # Summary statistics
             st.markdown("---")
             col1, col2, col3 = st.columns(3)
@@ -640,5 +791,82 @@ if st.session_state.data is not None:
                 avg_kl = np.mean([res['kl'] for res in st.session_state.kl_results.values()])
                 st.metric("Average KL", f"{avg_kl:.6f}")
 
+    # Tab 6: Acceptance Ratio
+    with tabs[5]:
+        # st.subheader("✅ Acceptance Ratio: Morph Samples in Original Distribution")
+        
+        morph_logpdfs = st.session_state.morph_logpdf_on_original
+        
+        if len(morph_logpdfs) == 0:
+            st.info("Run **MorphZ Analysis** first to generate and evaluate samples.")
+        else:
+            
+            # --- Histogram Plot ---
+            # st.markdown("### Histogram of Original LogPDF Evaluated at Morph Samples")
+            # st.markdown("This shows how likely the **morphed samples** are under the **original (true) distribution**.")
+            
+            # fig, ax = plt.subplots(figsize=(10, 6))
+            # colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink']
+            orders = sorted(morph_logpdfs.keys())
+            
+            # Filter original LogPDF for plotting threshold reference
+            finite_original_logpdf = st.session_state.logpdf_values[np.isfinite(st.session_state.logpdf_values)]
+            
+            for idx, order in enumerate(orders):
+                logpdfs = morph_logpdfs[order]
+                # Filter out non-finite LogPDFs for plotting (already mostly handled by logpdf fix)
+                finite_logpdfs = logpdfs[np.isfinite(logpdfs)]
+                
+                # ax.hist(finite_logpdfs, bins=50, density=True, alpha=0.6, 
+                #         color=colors[idx % len(colors)], label=f'Morph Order {order}')
+
+            # # Plot original LogPDF (data from tabs[1]) for comparison
+            # ax.hist(finite_logpdf, bins=50, density=True, 
+            #             histtype='step', linewidth=2, color='blue', label='Original Data LogPDF')
+
+            # ax.set_title("Original LogPDF ($\ln p(\mathbf{x})$) at Morph Sample Locations")
+            # ax.set_xlabel("Original LogPDF Value")
+            # ax.set_ylabel("Density")
+            # ax.legend()
+            # st.pyplot(fig)
+            # plt.close()
+
+            # --- Acceptance Table ---
+            st.markdown("### Acceptance Table")
+            finite_original_logpdf = st.session_state.logpdf_values[np.isfinite(st.session_state.logpdf_values)]
+
+            if len(finite_original_logpdf) > 0:
+                # Define acceptance threshold based on the minimum finite original LogPDF
+                min_original_logpdf = np.min(finite_original_logpdf)
+            else:
+                # Fallback if original logpdfs were all outside support
+                min_original_logpdf = -1e10
+            
+            acceptance_results = []
+            n_proposed = n_morph_samples # From the input field above
+            
+            for order in orders:
+                logpdfs = morph_logpdfs[order]
+                # Calculate accepted samples (LogPDF is higher than the minimum observed in true samples)
+                # Since logpdfs array now contains -1e10 instead of -inf, this comparison works reliably.
+                n_accepted = np.sum(logpdfs >= min_original_logpdf)
+                acceptance_rate = (n_accepted / n_proposed) * 100
+                
+                acceptance_results.append({
+                    "Morph Order": order,
+                    "Proposed Samples": n_proposed,
+                    "Accepted Samples": n_accepted,
+                    "Acceptance Rate (%)": acceptance_rate
+                })
+
+            accept_df = pd.DataFrame(acceptance_results)
+            
+            st.dataframe(
+                accept_df.style.format({
+                    "Acceptance Rate (%)": "{:.2f}%"
+                }).highlight_max(subset=["Acceptance Rate (%)"], color='lightgreen'),
+                use_container_width=True
+            )
+
 st.markdown("---")
-st.markdown("Built with ❤️ using Streamlit | Powered by MorphZ")
+st.markdown("Built using Streamlit | Powered by MorphZ")
