@@ -402,8 +402,8 @@ with col1:
 
 with col2:
     st.subheader("🎲 Sample & Analyze")
-    
-    n_samples = st.number_input("Number of Samples", min_value=10, max_value=10000, value=2000, step=100)
+    st.markdown("Use 100-300 samples for fast results.")
+    n_samples = st.number_input("Number of Samples", min_value=10, max_value=10000, value=200, step=100)
     
     if st.button("🚀 Run Simulation", type="primary"):
         if st.session_state.sim.total_dim == 0:
@@ -449,24 +449,38 @@ if st.session_state.data is not None:
         plt.close()
     
     # Tab 2: Log PDF
+    # Tab 2: Log PDF
     with tabs[1]:
         st.subheader("Log PDF Distribution")
+        
+        # Controls for histogram
+        col_hist1, col_hist2 = st.columns(2)
+        with col_hist1:
+            hist_bins = st.slider("Number of Bins", min_value=10, max_value=100, value=20, step=10)
+        with col_hist2:
+            hist_sample_limit = st.slider("Max Samples to Plot", min_value=100, max_value=len(data), value=min(2000, len(data)), step=10)
         
         # Ensure finite values for plotting range
         finite_logpdf = logpdf_values[np.isfinite(logpdf_values)]
         if len(finite_logpdf) == 0:
             st.warning("All Log PDF values are non-finite (outside distribution support). Check configuration.")
         else:
+            # Subsample for plotting if needed
+            plot_logpdf = finite_logpdf[:hist_sample_limit] if len(finite_logpdf) > hist_sample_limit else finite_logpdf
+            
             fig, ax = plt.subplots(figsize=(8, 4))
-            ax.hist(finite_logpdf, bins=30, color='skyblue', edgecolor='black')
-            ax.set_title("Histogram of Log PDF Values for Samples")
+            ax.hist(plot_logpdf, bins=hist_bins, color='skyblue', edgecolor='black')
+            ax.set_title(f"Histogram of Log PDF Values ({len(plot_logpdf)} samples)")
             ax.set_xlabel("Log PDF")
             ax.set_ylabel("Frequency")
             st.pyplot(fig)
             plt.close()
             
-            st.metric("Mean Log PDF", f"{np.mean(finite_logpdf):.4f}")
-            st.metric("Std Log PDF", f"{np.std(finite_logpdf):.4f}")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                st.metric("Mean Log PDF", f"{np.mean(finite_logpdf):.4f}")
+            with col_m2:
+                st.metric("Std Log PDF", f"{np.std(finite_logpdf):.4f}")
     
     # Tab 3: MorphZ Analysis
     with tabs[2]:
@@ -476,11 +490,11 @@ if st.session_state.data is not None:
         with col_a:
             morph_orders = st.multiselect(
                 "Select Morph Orders",
-                [2, 3, 4, 5, 6],
+                [1,2, 3, 4, 5, 6],
                 default=[2, 3]
             )
         with col_b:
-            n_morph_samples = st.number_input("Samples per Morph", 1000, 10000, 4000, 500)
+            n_morph_samples = st.number_input("Samples per Morph", min_value=10, max_value=10000, value=1000, step=100)
         
         # Toggle for removing existing directory
         remove_existing = st.checkbox(
@@ -520,32 +534,51 @@ if st.session_state.data is not None:
 
                             # Use mz.evidence to compute and save
                             try:
-                                m = mz.evidence(
+                                if order == 1:
+                                    m = mz.evidence(
                                     data, 
                                     logpdf_values,
                                     st.session_state.sim.logpdf,
                                     n_resamples=2,
-                                    morph_type=f"{order}_group",
-                                    kde_bw='scott',
+                                    morph_type=f"indep",
+                                    kde_bw='silverman',
                                     param_names=param_names,
                                     output_path=output_dir
-                                )
-                                st.success(f"✅ Successfully computed Morph approx. for order {order}!")
+                                    )
+                                    st.success(f"✅ Successfully computed Morph approx. for order {order}!")
+
+                                else:
+                                    m = mz.evidence(
+                                            data, 
+                                            logpdf_values,
+                                            st.session_state.sim.logpdf,
+                                            n_resamples=2,
+                                            morph_type=f"{order}_group",
+                                            kde_bw='silverman',
+                                            param_names=param_names,
+                                            output_path=output_dir)
+                                    st.success(f"✅ Successfully computed Morph approx. for order {order}!")
                             except Exception as e:
                                 # Continue on error in evidence computation
                                 print(f"⚠️ Warning during mz.evidence for order {order}: {e}")
 
                             
                             # Load and resample - this is the critical part
-                            morph_kde = mz.GroupKDE(
-                                data, 
-                                f"{output_dir}/params_{order}-order_TC.json",
-                                param_names=param_names
-                            )
+                            if order == 1:
+                                morph_kde = mz.Morph_Indep(data,kde_bw="silverman")
+                            else:
+                                    morph_kde = mz.GroupKDE(
+                                        data, 
+                                        f"{output_dir}/params_{order}-order_TC.json",
+                                        param_names=param_names
+                                    )
+                             # Compute log PDFs for morph samples under morph distribution
+
                             morph_samples = morph_kde.resample(n_morph_samples)
-                            
-                            # Compute log PDFs for morph samples under morph distribution
-                            morph_logpdf_morph = morph_kde.logpdf(morph_samples.T)
+                            if order ==1:
+                                morph_logpdf_morph = morph_kde.logpdf_kde(morph_samples.T)
+                            else:
+                                morph_logpdf_morph = morph_kde.logpdf(morph_samples.T)
                             
                             # --- NEW EVALUATION STEP ---
                             # Evaluate the morph samples at the ORIGINAL logpdf function
@@ -559,7 +592,10 @@ if st.session_state.data is not None:
                             }
                             
                             # Compute KL divergence: D_KL(Original || Morph)
-                            morph_logpdf_on_original_kl = morph_kde.logpdf(data.T)
+                            if order ==1:
+                                morph_logpdf_on_original_kl = morph_kde.logpdf_kde(data.T)
+                            else:
+                                morph_logpdf_on_original_kl = morph_kde.logpdf(data.T)
                             
                             # Ensure both arrays are 1D
                             if isinstance(morph_logpdf_on_original_kl, np.ndarray):
@@ -599,7 +635,7 @@ if st.session_state.data is not None:
                     
                     try:
                         # Only plot first 5 dimensions if total dim is huge
-                        plot_dims = min(5, st.session_state.sim.total_dim)
+                        plot_dims = st.session_state.sim.total_dim
                         plot_indices = list(range(plot_dims))
                         
                         with st.spinner("Generating corner plot..."):
@@ -639,8 +675,7 @@ if st.session_state.data is not None:
                             )
                             
                             st.pyplot(fig)
-                            if st.session_state.sim.total_dim > 5:
-                                st.caption("Note: Only showing first 5 dimensions for clarity.")
+                    
                             plt.close()
                     except Exception as e:
                         st.error(f"Error generating corner plot: {e}")
@@ -717,13 +752,16 @@ if st.session_state.data is not None:
             st.info("Run MorphZ Analysis first to compute KL divergences.")
         else:
             st.markdown("### KL Divergence: D<sub>KL</sub>(Original || Morph)", unsafe_allow_html=True)
-            st.markdown("*Lower values indicate better approximation. Negative values can occur due to Monte Carlo estimation with finite samples.*")
+            # Retain the original note about the source of negative values
+            st.markdown("*Lower values indicate better approximation. **Negative values shown are raw Monte Carlo estimates; the true KL divergence is non-negative.** The KL value is clipped to zero for ranking and plotting.*")
             
             # Create DataFrame for table
             kl_df = pd.DataFrame([
                 {
                     "Morph Order": order, 
-                    "KL Divergence": res['kl'],
+                    # Clip the KL divergence for display in the table, setting it to 0 if negative
+                    "KL Divergence (Clipped)": max(0, res['kl']),
+                    "KL Divergence (Raw)": res['kl'], # Show the raw estimate for transparency
                     "Std Error": res['std'],
                     "95% CI Lower": res['lower_ci'],
                     "95% CI Upper": res['upper_ci']
@@ -734,11 +772,12 @@ if st.session_state.data is not None:
             # Display table
             st.dataframe(
                 kl_df.style.format({
-                    "KL Divergence": "{:.6f}",
+                    "KL Divergence (Clipped)": "{:.6f}",
+                    "KL Divergence (Raw)": "{:.6f}",
                     "Std Error": "{:.6f}",
                     "95% CI Lower": "{:.6f}",
                     "95% CI Upper": "{:.6f}"
-                }).highlight_min(subset=["KL Divergence"], color='lightgreen'),
+                }).highlight_min(subset=["KL Divergence (Clipped)"], color='lightgreen'),
                 use_container_width=True
             )
             
@@ -746,27 +785,34 @@ if st.session_state.data is not None:
             fig, ax = plt.subplots(figsize=(10, 6))
             
             orders = sorted(st.session_state.kl_results.keys())
-            kl_values = [st.session_state.kl_results[o]['kl'] for o in orders]
+            # Use the clipped KL values for the bar height
+            kl_values_raw = [st.session_state.kl_results[o]['kl'] for o in orders]
+            kl_values_clipped = [max(0, kl) for kl in kl_values_raw]
             kl_stds = [st.session_state.kl_results[o]['std'] for o in orders]
             
             x_pos = np.arange(len(orders))
-            bars = ax.bar(x_pos, kl_values, color='steelblue', alpha=0.7, edgecolor='black', yerr=kl_stds, capsize=5)
+            # Plot using the clipped values
+            bars = ax.bar(x_pos, kl_values_clipped, color='steelblue', alpha=0.7, edgecolor='black', yerr=kl_stds, capsize=5)
             ax.set_xticks(x_pos)
             ax.set_xticklabels([f"Order {o}" for o in orders])
-            ax.set_ylabel("KL Divergence", fontsize=12)
+            ax.set_ylabel("KL Divergence (Clipped at 0)", fontsize=12)
             ax.set_xlabel("Morph Order", fontsize=12)
-            ax.set_title("KL Divergence: Original || Morph (with 95% CI)", fontsize=14, fontweight='bold')
+            ax.set_title("KL Divergence: Original || Morph (Raw Estimates clipped to 0)", fontsize=14, fontweight='bold')
             ax.grid(axis='y', alpha=0.3, linestyle='--')
+            # Add a zero line
             ax.axhline(y=0, color='red', linestyle='--', linewidth=1, alpha=0.5, label='Zero line')
             
-            # Add value labels on bars
-            for i, (bar, val, std) in enumerate(zip(bars, kl_values, kl_stds)):
-                height = bar.get_height()
-                y_pos = height + std if height > 0 else height - std
+            # Add value labels on bars (using the original raw values for display)
+            for i, (bar, val_raw, val_clipped, std) in enumerate(zip(bars, kl_values_raw, kl_values_clipped, kl_stds)):
+                # If clipped value is > 0, place label at clipped height + std, else at 0 - std (to show the negative estimate)
+                height = bar.get_height() 
+                y_pos = height + std if val_raw >= 0 else 0 - std 
+                
+                # Show the raw estimate in the label
                 ax.text(bar.get_x() + bar.get_width()/2., y_pos,
-                       f'{val:.4f}',
-                       ha='center', va='bottom' if height > 0 else 'top', 
-                       fontsize=10, fontweight='bold')
+                        f'{val_raw:.4f}',
+                        ha='center', va='bottom' if val_raw >= 0 else 'top', 
+                        fontsize=10, fontweight='bold')
             
             ax.legend()
             st.pyplot(fig)
@@ -775,21 +821,30 @@ if st.session_state.data is not None:
             # Summary statistics
             st.markdown("---")
             col1, col2, col3 = st.columns(3)
+            
+            # Find the best/worst order based on the CLIPPED KL value
+            kl_results_clipped = {order: max(0, res['kl']) for order, res in st.session_state.kl_results.items()}
+            
             with col1:
-                best_order = min(st.session_state.kl_results, key=lambda x: st.session_state.kl_results[x]['kl'])
-                best_kl = st.session_state.kl_results[best_order]['kl']
+                # Find best based on clipped KL
+                best_order = min(st.session_state.kl_results, key=lambda x: kl_results_clipped[x])
+                # Display the CLIPPED KL value
+                best_kl_clipped = kl_results_clipped[best_order]
                 best_std = st.session_state.kl_results[best_order]['std']
                 st.metric("Best Approximation", f"Order {best_order}", 
-                         f"KL = {best_kl:.6f} ± {best_std:.6f}")
+                          f"KL = {best_kl_clipped:.6f} ± {best_std:.6f}")
             with col2:
-                worst_order = max(st.session_state.kl_results, key=lambda x: st.session_state.kl_results[x]['kl'])
-                worst_kl = st.session_state.kl_results[worst_order]['kl']
+                # Find worst based on clipped KL
+                worst_order = max(st.session_state.kl_results, key=lambda x: kl_results_clipped[x])
+                # Display the CLIPPED KL value
+                worst_kl_clipped = kl_results_clipped[worst_order]
                 worst_std = st.session_state.kl_results[worst_order]['std']
                 st.metric("Worst Approximation", f"Order {worst_order}",
-                         f"KL = {worst_kl:.6f} ± {worst_std:.6f}")
+                          f"KL = {worst_kl_clipped:.6f} ± {worst_std:.6f}")
             with col3:
-                avg_kl = np.mean([res['kl'] for res in st.session_state.kl_results.values()])
-                st.metric("Average KL", f"{avg_kl:.6f}")
+                # Calculate average based on CLIPPED KL values
+                avg_kl_clipped = np.mean(list(kl_results_clipped.values()))
+                st.metric("Average KL (Clipped)", f"{avg_kl_clipped:.6f}")
 
     # Tab 6: Acceptance Ratio
     with tabs[5]:
