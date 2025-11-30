@@ -489,7 +489,7 @@ if st.session_state.data is not None:
             help="If enabled, deletes the output folder before running to ensure clean results."
         )
         
-        if st.button("🧬 Run MorphZ Analysis"):
+        if st.button("Run MorphZ Analysis"):
             if len(morph_orders) == 0:
                 st.warning("Please select at least one morph order.")
             else:
