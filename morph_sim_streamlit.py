@@ -737,7 +737,7 @@ if st.session_state.data is not None:
 
                 default_selected = available_morphs.copy()
                 with ucol1:
-                    plot_dims = st.slider("Number of Bins", min_value=2, max_value=st.session_state.sim.total_dim, value=min(st.session_state.sim.total_dim,8), step=1)
+                    plot_dims = st.slider("Number of plotted parameters:", min_value=2, max_value=st.session_state.sim.total_dim, value=min(st.session_state.sim.total_dim,8), step=1)
                     show_original = True
                     show_morphs = True
                     # create the multiselect with fixed key so we can change via buttons
