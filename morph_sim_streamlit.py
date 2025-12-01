@@ -511,10 +511,10 @@ if st.session_state.data is not None:
             plot_logpdf = finite_logpdf[:hist_sample_limit] if len(finite_logpdf) > hist_sample_limit else finite_logpdf
             
             fig, ax = plt.subplots(figsize=(8, 4))
-            ax.hist(plot_logpdf, bins=hist_bins, color='skyblue', edgecolor='black')
+            ax.hist(plot_logpdf, bins=hist_bins,density=True, color='royalblue', edgecolor='grey')
             ax.set_title(f"Histogram of Log PDF Values ({len(plot_logpdf)} samples)")
-            ax.set_xlabel("Log PDF")
-            ax.set_ylabel("Frequency")
+            ax.set_xlabel("Log(PDF)")
+            ax.set_ylabel("Density")
             st.pyplot(fig)
             plt.close()
             
@@ -924,7 +924,7 @@ with tabs[2]:
             if 'ref' in st.session_state.kl_results:
                 res = st.session_state.kl_results['ref']
                 kl_data.append({
-                    "Approximation": "Reference (Prod. Normals)",
+                    "Approximation": "Ref (Prod. Normals\n(sample means and stds))",
                     "KL Divergence (Clipped)": max(0, res['kl']),
                     "KL Divergence (Raw)": res['kl'],
                     "Std Error": res['std'],
@@ -982,7 +982,7 @@ with tabs[2]:
             
             x_pos = np.arange(len(plot_items))
             # Color reference bar differently
-            bar_colors = ['gray' if o == 'ref' else 'steelblue' for o in plot_items]
+            bar_colors = ['gray' if o == 'ref' else 'olive' for o in plot_items]
             
             # Plot using the clipped values
             bars = ax.bar(x_pos, kl_values_clipped, color=bar_colors, alpha=0.7, edgecolor='black', yerr=kl_stds, capsize=5)
