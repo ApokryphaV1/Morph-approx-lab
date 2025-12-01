@@ -462,9 +462,7 @@ with col2:
 
 # Display results
 if st.session_state.data is not None:
-    data = st.session_state.data
-    logpdf_values = st.session_state.logpdf_values
-    param_names = st.session_state.sim.get_param_names()
+    
     
     # Tabs list
     tabs = st.tabs([
@@ -475,7 +473,10 @@ if st.session_state.data is not None:
         "📉 KL Divergence",
         "✅ Acceptance Ratio"
     ])
-    
+
+    data = st.session_state.data
+    logpdf_values = st.session_state.logpdf_values
+    param_names = st.session_state.sim.get_param_names()
     # Tab 1: Correlation Heatmap
     with tabs[0]:
         st.subheader("Correlation Matrix")
@@ -490,7 +491,7 @@ if st.session_state.data is not None:
         st.pyplot(fig)
         plt.close()
     
-    # Tab 2: Log PDF
+   
     # Tab 2: Log PDF
     with tabs[1]:
         st.subheader("Log PDF Distribution")
@@ -511,10 +512,10 @@ if st.session_state.data is not None:
             plot_logpdf = finite_logpdf[:hist_sample_limit] if len(finite_logpdf) > hist_sample_limit else finite_logpdf
             
             fig, ax = plt.subplots(figsize=(8, 4))
-            ax.hist(plot_logpdf, bins=hist_bins,density=True, color='royalblue', edgecolor='grey')
+            ax.hist(plot_logpdf, bins=hist_bins, color='royalblue', edgecolor='grey')
             ax.set_title(f"Histogram of Log PDF Values ({len(plot_logpdf)} samples)")
             ax.set_xlabel("Log(PDF)")
-            ax.set_ylabel("Density")
+            ax.set_ylabel("density")
             st.pyplot(fig)
             plt.close()
             
@@ -524,346 +525,351 @@ if st.session_state.data is not None:
             with col_m2:
                 st.metric("Std Log PDF", f"{np.std(finite_logpdf):.4f}")
     
-  # Tab 3: MorphZ Analysis (full replacement) - unified colors for corner & histogram
-with tabs[2]:
-    st.subheader("MorphZ Morphing Analysis")
+# Tab 3: MorphZ Analysis (full replacement) - unified colors for corner & histogram
+    with tabs[2]:
 
-    # Controls
-    col_a, col_b = st.columns(2)
-    with col_a:
-        morph_orders = st.multiselect(
-            "Select Morph Orders",
-            [1, 2, 3, 4, 5, 6],
-            default=[1, 2, 3],
-            key="ui_morph_orders"
-        )
-    with col_b:
-        n_morph_samples = st.number_input(
-            "Samples per Morph", min_value=10, max_value=20000,
-            value=1000, step=100, key="ui_n_morph_samples"
-        )
-
-    remove_existing = st.checkbox(
-        "🗑️ Remove existing output directory before analysis",
-        value=True,
-        help="If enabled, deletes the output folder before running to ensure clean results."
-    )
-
-    run_btn = st.button("Run MorphZ Analysis", type="primary")
-
-    if run_btn:
-        # basic checks
-        if len(morph_orders) == 0:
-            st.warning("Please select at least one morph order.")
-        elif data is None:
-            st.error("No data available. Run sampling first.")
+        if 'morph_data' not in st.session_state:
+            st.info("No factors added yet. Use the sidebar to configure.")
         else:
-            with st.spinner("Computing Morph approximation transformations..."):
-                output_dir = f"{len(param_names)}_d"
 
-                # clean output dir optionally
-                if remove_existing and os.path.exists(output_dir):
-                    try:
-                        shutil.rmtree(output_dir)
-                        st.info(f"🗑️ Removed existing directory: {output_dir}")
-                    except Exception as e:
-                        st.warning(f"Could not remove existing directory: {e}")
+            st.subheader("MorphZ Morphing Analysis")
 
-                os.makedirs(output_dir, exist_ok=True)
-
-                # containers to fill
-                morph_data = {}
-                kl_results = {}
-                morph_logpdf_on_original = {}
-
-                # iterate selected orders
-                for order in morph_orders:
-                    try:
-                        n_dim = len(param_names)
-                        try:
-                            n_blocks = math.comb(n_dim, order)
-                        except Exception:
-                            n_blocks = None
-                        st.info(f"⏳ Order {order}: computing total correlation (blocks ~ {n_blocks})")
-
-                        # run mz.evidence (best-effort)
-                        try:
-                            if order == 1:
-                                _ = mz.evidence(
-                                    data,
-                                    logpdf_values,
-                                    st.session_state.sim.logpdf,
-                                    n_resamples=2,
-                                    morph_type="indep",
-                                    kde_bw="silverman",
-                                    param_names=param_names,
-                                    output_path=output_dir
-                                )
-                            else:
-                                _ = mz.evidence(
-                                    data,
-                                    logpdf_values,
-                                    st.session_state.sim.logpdf,
-                                    n_resamples=2,
-                                    morph_type=f"{order}_group",
-                                    kde_bw="silverman",
-                                    param_names=param_names,
-                                    output_path=output_dir
-                                )
-                        except Exception as e_evidence:
-                            print(f"mz.evidence warning for order {order}: {e_evidence}")
-
-                        # instantiate morph KDE object
-                        try:
-                            if order == 1:
-                                morph_kde = mz.Morph_Indep(data, kde_bw="silverman")
-                            else:
-                                morph_kde = mz.GroupKDE(
-                                    data,
-                                    f"{output_dir}/params_{order}-order_TC.json",
-                                    param_names=param_names
-                                )
-                        except Exception as e_inst:
-                            st.error(f"Could not initialize morph object for order {order}: {e_inst}")
-                            continue
-
-                        # resample from morph
-                        try:
-                            m_samples = morph_kde.resample(n_morph_samples)
-                        except Exception as e_res:
-                            st.error(f"Resample failed for order {order}: {e_res}")
-                            continue
-
-                        # compute morph logpdf on morph samples
-                        try:
-                            if order == 1:
-                                morph_logpdf_morph = morph_kde.logpdf_kde(m_samples.T)
-                            else:
-                                morph_logpdf_morph = morph_kde.logpdf(m_samples.T)
-                        except Exception as e_logm:
-                            st.warning(f"Could not compute morph logpdf for order {order}: {e_logm}")
-                            morph_logpdf_morph = np.full(m_samples.shape[0], -1e10)
-
-                        # evaluate original logpdf at morph samples (for acceptance table analyses)
-                        try:
-                            original_logpdf_at_morph_samples = st.session_state.sim.logpdf(m_samples)
-                            morph_logpdf_on_original[order] = np.atleast_1d(original_logpdf_at_morph_samples).astype(float)
-                        except Exception as e_eval:
-                            st.warning(f"Could not evaluate original logpdf at morph samples for order {order}: {e_eval}")
-                            morph_logpdf_on_original[order] = np.full(m_samples.shape[0], -1e10)
-
-                        # store morph data
-                        morph_data[order] = {
-                            "samples": m_samples,
-                            "logpdf": np.atleast_1d(morph_logpdf_morph).astype(float)
-                        }
-
-                        # compute morph logpdf on original data (for KL)
-                        try:
-                            if order == 1:
-                                morph_logpdf_on_data = morph_kde.logpdf_kde(data.T)
-                            else:
-                                morph_logpdf_on_data = morph_kde.logpdf(data.T)
-                            morph_logpdf_on_data = np.atleast_1d(morph_logpdf_on_data).astype(float)
-                        except Exception as e_m_on_d:
-                            st.warning(f"Could not compute morph logpdf on original data for order {order}: {e_m_on_d}")
-                            morph_logpdf_on_data = np.full(data.shape[0], -1e10)
-
-                        # compute KL estimate (Original || Morph)
-                        try:
-                            kl_div, kl_std = compute_kl_divergence(logpdf_values, morph_logpdf_on_data)
-                        except Exception as e_kl:
-                            st.warning(f"KL computation failed for order {order}: {e_kl}")
-                            kl_div, kl_std = np.nan, np.nan
-
-                        kl_results[order] = {
-                            "kl": float(kl_div),
-                            "std": float(kl_std),
-                            "lower_ci": float(kl_div - 1.96 * kl_std) if np.isfinite(kl_div) and np.isfinite(kl_std) else np.nan,
-                            "upper_ci": float(kl_div + 1.96 * kl_std) if np.isfinite(kl_div) and np.isfinite(kl_std) else np.nan
-                        }
-
-                        st.success(f"Completed Morph order {order}")
-                    except Exception as e_outer:
-                        st.error(f"Unhandled error for order {order}: {e_outer}")
-                        continue
-
-                # --- Reference: Product of independent normals baseline ---
-                try:
-                    ref_dist = ProductOfNormalsReference(data)
-                    ref_logpdf_on_data = ref_dist.logpdf(data)
-                    kl_ref, kl_ref_std = compute_kl_divergence(logpdf_values, ref_logpdf_on_data)
-
-                    kl_results["ref"] = {
-                        "kl": float(kl_ref),
-                        "std": float(kl_ref_std),
-                        "lower_ci": float(kl_ref - 1.96 * kl_ref_std),
-                        "upper_ci": float(kl_ref + 1.96 * kl_ref_std)
-                    }
-
-                    # store reference samples/logpdf for plotting
-                    ref_samples = ref_dist.sample(n_morph_samples)
-                    morph_data["ref"] = {
-                        "samples": ref_samples,
-                        "logpdf": ref_dist.logpdf(ref_samples)
-                    }
-                    st.success("Computed Reference baseline (Product of Normals).")
-                except Exception as e_ref:
-                    st.warning(f"Reference baseline failed: {e_ref}")
-
-                # save to session state for other tabs/plots
-                st.session_state.morph_data = morph_data
-                st.session_state.kl_results = kl_results
-                st.session_state.morph_logpdf_on_original = morph_logpdf_on_original
-
-    # After run (or if previously run) — visualization & analysis
-    st.markdown("---")
-    st.header("Morph Results & Visualizations")
-
-    # guard if no morphs computed yet
-    available_morphs = list(st.session_state.get("morph_data", {}).keys())
-    if len(available_morphs) == 0:
-        st.info("No morphs computed yet. Use 'Run MorphZ Analysis' to compute morph approximations (and the Reference baseline).")
-    else:
-        # Unified, robust shared toggles that modify session state
-        st.subheader("Visualization toggles (shared)")
-        ucol1, ucol2 = st.columns(2)
-
-        default_selected = available_morphs.copy()
-        with ucol1:
-            plot_dims = st.slider("Number of Bins", min_value=2, max_value=st.session_state.sim.total_dim, value=min(st.session_state.sim.total_dim,8), step=1)
-            show_original = True
-            show_morphs = True
-            # create the multiselect with fixed key so we can change via buttons
-            st.multiselect(
-                "Select morphs to display (shared)",
-                options=available_morphs,
-                default=default_selected,
-                key="sel_shared"
-            )
-
-        selected_morphs_shared = st.session_state.get("sel_shared", default_selected)
-        # Ensure selection contains only currently available keys
-        selected_morphs_shared = [k for k in selected_morphs_shared if k in available_morphs]
-
-        # Define a single color palette to be used for both corner & hist plots
-        palette_colors = ['#1f77b4',  # blue (original)
-                          '#d62728',  # red
-                          '#2ca02c',  # green
-                          '#ff7f0e',  # orange
-                          '#9467bd',  # purple
-                          '#8c564b',  # brown
-                          '#e377c2',  # pink
-                          '#17becf']  # cyan
-
-        # Map each displayed key (excluding original) to a color deterministically
-        morph_color_map = {}
-        for idx, key in enumerate(selected_morphs_shared):
-            # +1 to reserve palette_colors[0] for original
-            morph_color_map[key] = palette_colors[(idx + 1) % len(palette_colors)]
-
-        # --- Corner plot (uses same toggles & unified contour levels) ---
-        st.subheader("Corner Plot Comparison")
-        try:
-            # choose dims to plot (safe guard)
-            data_plot = data[:, :plot_dims]
-            labels_plot = param_names[:plot_dims]
-
-            # Define unified contour levels (these are credible fractions used by corner)
-            # Pick whichever set suits your needs; these are typical choices (50%, 75%, 95%)
-            contour_levels = [0.5, 0.75, 0.95]
-
-            fig = None
-            if show_original:
-                # Use palette_colors[0] for original
-                fig = corner.corner(
-                    data_plot,
-                    labels=labels_plot,
-                    color=palette_colors[0],
-                    hist_kwargs={"density": True},
-                    show_titles=True,
-                    title_fmt=".2f",
-                    levels=contour_levels,
-                    fill_contours=True,
-                    plot_contours=True,
-                    smooth=1.0,
-                    contour_kwargs={"linewidths": 1.2}
+            # Controls
+            col_a, col_b = st.columns(2)
+            with col_a:
+                morph_orders = st.multiselect(
+                    "Select Morph Orders",
+                    [1, 2, 3, 4, 5, 6],
+                    default=[1, 2, 3],
+                    key="ui_morph_orders"
+                )
+            with col_b:
+                n_morph_samples = st.number_input(
+                    "Samples per Morph", min_value=10, max_value=20000,
+                    value=1000, step=100, key="ui_n_morph_samples"
                 )
 
-            if show_morphs and len(selected_morphs_shared) > 0:
-                for idx, key in enumerate(selected_morphs_shared):
-                    # if user selected the original key accidentally (rare), skip - original is plotted separately above
-                    if key == "original" or key == "data":
-                        continue
-                    mdata = st.session_state.morph_data[key]
-                    m_samples_plot = mdata['samples'][:, :plot_dims]
-                    color = morph_color_map.get(key, palette_colors[(idx + 1) % len(palette_colors)])
-                    corner.corner(
-                        m_samples_plot,
-                        labels=labels_plot,
-                        fig=fig,
-                        color=color,
-                        hist_kwargs={"density": True},
-                        show_titles=True,
-                        title_fmt=".2f",
-                        levels=contour_levels,
-                        fill_contours=True,
-                        plot_contours=True,
-                        smooth=1.0,
-                        contour_kwargs={"linewidths": 1.2}
+            remove_existing = st.checkbox(
+                "🗑️ Remove existing output directory before analysis",
+                value=True,
+                help="If enabled, deletes the output folder before running to ensure clean results."
+            )
+
+            run_btn = st.button("Run MorphZ Analysis", type="primary")
+
+            if run_btn:
+                # basic checks
+                if len(morph_orders) == 0:
+                    st.warning("Please select at least one morph order.")
+                elif data is None:
+                    st.error("No data available. Run sampling first.")
+                else:
+                    with st.spinner("Computing Morph approximation transformations..."):
+                        output_dir = f"{len(param_names)}_d"
+
+                        # clean output dir optionally
+                        if remove_existing and os.path.exists(output_dir):
+                            try:
+                                shutil.rmtree(output_dir)
+                                st.info(f"🗑️ Removed existing directory: {output_dir}")
+                            except Exception as e:
+                                st.warning(f"Could not remove existing directory: {e}")
+
+                        os.makedirs(output_dir, exist_ok=True)
+
+                        # containers to fill
+                        morph_data = {}
+                        kl_results = {}
+                        morph_logpdf_on_original = {}
+
+                        # iterate selected orders
+                        for order in morph_orders:
+                            try:
+                                n_dim = len(param_names)
+                                try:
+                                    n_blocks = math.comb(n_dim, order)
+                                except Exception:
+                                    n_blocks = None
+                                st.info(f"⏳ Order {order}: computing total correlation (blocks = {n_blocks})")
+
+                                # run mz.evidence (best-effort)
+                                try:
+                                    if order == 1:
+                                        _ = mz.evidence(
+                                            data,
+                                            logpdf_values,
+                                            st.session_state.sim.logpdf,
+                                            n_resamples=2,
+                                            morph_type="indep",
+                                            kde_bw="silverman",
+                                            param_names=param_names,
+                                            output_path=output_dir
+                                        )
+                                    else:
+                                        _ = mz.evidence(
+                                            data,
+                                            logpdf_values,
+                                            st.session_state.sim.logpdf,
+                                            n_resamples=2,
+                                            morph_type=f"{order}_group",
+                                            kde_bw="silverman",
+                                            param_names=param_names,
+                                            output_path=output_dir
+                                        )
+                                except Exception as e_evidence:
+                                    print(f"mz.evidence warning for order {order}: {e_evidence}")
+
+                                # instantiate morph KDE object
+                                try:
+                                    if order == 1:
+                                        morph_kde = mz.Morph_Indep(data, kde_bw="silverman")
+                                    else:
+                                        morph_kde = mz.GroupKDE(
+                                            data,
+                                            f"{output_dir}/params_{order}-order_TC.json",
+                                            param_names=param_names
+                                        )
+                                except Exception as e_inst:
+                                    st.error(f"Could not initialize morph object for order {order}: {e_inst}")
+                                    continue
+
+                                # resample from morph
+                                try:
+                                    m_samples = morph_kde.resample(n_morph_samples)
+                                except Exception as e_res:
+                                    st.error(f"Resample failed for order {order}: {e_res}")
+                                    continue
+
+                                # compute morph logpdf on morph samples
+                                try:
+                                    if order == 1:
+                                        morph_logpdf_morph = morph_kde.logpdf_kde(m_samples.T)
+                                    else:
+                                        morph_logpdf_morph = morph_kde.logpdf(m_samples.T)
+                                except Exception as e_logm:
+                                    st.warning(f"Could not compute morph logpdf for order {order}: {e_logm}")
+                                    morph_logpdf_morph = np.full(m_samples.shape[0], -1e10)
+
+                                # evaluate original logpdf at morph samples (for acceptance table analyses)
+                                try:
+                                    original_logpdf_at_morph_samples = st.session_state.sim.logpdf(m_samples)
+                                    morph_logpdf_on_original[order] = np.atleast_1d(original_logpdf_at_morph_samples).astype(float)
+                                except Exception as e_eval:
+                                    st.warning(f"Could not evaluate original logpdf at morph samples for order {order}: {e_eval}")
+                                    morph_logpdf_on_original[order] = np.full(m_samples.shape[0], -1e10)
+
+                                # store morph data
+                                morph_data[order] = {
+                                    "samples": m_samples,
+                                    "logpdf": np.atleast_1d(morph_logpdf_morph).astype(float)
+                                }
+
+                                # compute morph logpdf on original data (for KL)
+                                try:
+                                    if order == 1:
+                                        morph_logpdf_on_data = morph_kde.logpdf_kde(data.T)
+                                    else:
+                                        morph_logpdf_on_data = morph_kde.logpdf(data.T)
+                                    morph_logpdf_on_data = np.atleast_1d(morph_logpdf_on_data).astype(float)
+                                except Exception as e_m_on_d:
+                                    st.warning(f"Could not compute morph logpdf on original data for order {order}: {e_m_on_d}")
+                                    morph_logpdf_on_data = np.full(data.shape[0], -1e10)
+
+                                # compute KL estimate (Original || Morph)
+                                try:
+                                    kl_div, kl_std = compute_kl_divergence(logpdf_values, morph_logpdf_on_data)
+                                except Exception as e_kl:
+                                    st.warning(f"KL computation failed for order {order}: {e_kl}")
+                                    kl_div, kl_std = np.nan, np.nan
+
+                                kl_results[order] = {
+                                    "kl": float(kl_div),
+                                    "std": float(kl_std),
+                                    "lower_ci": float(kl_div - 1.96 * kl_std) if np.isfinite(kl_div) and np.isfinite(kl_std) else np.nan,
+                                    "upper_ci": float(kl_div + 1.96 * kl_std) if np.isfinite(kl_div) and np.isfinite(kl_std) else np.nan
+                                }
+
+                                st.success(f"Completed Morph order {order}")
+                            except Exception as e_outer:
+                                st.error(f"Unhandled error for order {order}: {e_outer}")
+                                continue
+
+                        # --- Reference: Product of independent normals baseline ---
+                        try:
+                            ref_dist = ProductOfNormalsReference(data)
+                            ref_logpdf_on_data = ref_dist.logpdf(data)
+                            kl_ref, kl_ref_std = compute_kl_divergence(logpdf_values, ref_logpdf_on_data)
+
+                            kl_results["ref"] = {
+                                "kl": float(kl_ref),
+                                "std": float(kl_ref_std),
+                                "lower_ci": float(kl_ref - 1.96 * kl_ref_std),
+                                "upper_ci": float(kl_ref + 1.96 * kl_ref_std)
+                            }
+
+                            # store reference samples/logpdf for plotting
+                            ref_samples = ref_dist.sample(n_morph_samples)
+                            morph_data["ref"] = {
+                                "samples": ref_samples,
+                                "logpdf": ref_dist.logpdf(ref_samples)
+                            }
+                            st.success("Computed Reference baseline (Product of Normals).")
+                        except Exception as e_ref:
+                            st.warning(f"Reference baseline failed: {e_ref}")
+
+                        # save to session state for other tabs/plots
+                        st.session_state.morph_data = morph_data
+                        st.session_state.kl_results = kl_results
+                        st.session_state.morph_logpdf_on_original = morph_logpdf_on_original
+
+            # After run (or if previously run) — visualization & analysis
+            st.markdown("---")
+            st.header("Morph Results & Visualizations")
+
+            # guard if no morphs computed yet
+            available_morphs = list(st.session_state.get("morph_data", {}).keys())
+            if len(available_morphs) == 0:
+                st.info("No morphs computed yet. Use 'Run MorphZ Analysis' to compute morph approximations (and the Reference baseline).")
+            else:
+                # Unified, robust shared toggles that modify session state
+                st.subheader("Visualization toggles (shared)")
+                ucol1, ucol2 = st.columns(2)
+
+                default_selected = available_morphs.copy()
+                with ucol1:
+                    plot_dims = st.slider("Number of Bins", min_value=2, max_value=st.session_state.sim.total_dim, value=min(st.session_state.sim.total_dim,8), step=1)
+                    show_original = True
+                    show_morphs = True
+                    # create the multiselect with fixed key so we can change via buttons
+                    st.multiselect(
+                        "Select morphs to display (shared)",
+                        options=available_morphs,
+                        default=default_selected,
+                        key="sel_shared"
                     )
 
-            # legend
-            legend_lines = []
-            legend_labels = []
-            if show_original:
-                legend_lines.append(plt.Line2D([0], [0], color=palette_colors[0], lw=2))
-                legend_labels.append("Original")
-            if show_morphs:
-                for key in selected_morphs_shared:
-                    color = morph_color_map.get(key)
-                    legend_lines.append(plt.Line2D([0], [0], color=color, lw=2))
-                    legend_labels.append("Reference" if key == "ref" else f"Morph {key}")
+                selected_morphs_shared = st.session_state.get("sel_shared", default_selected)
+                # Ensure selection contains only currently available keys
+                selected_morphs_shared = [k for k in selected_morphs_shared if k in available_morphs]
 
-            if fig is not None:
-                fig.legend(legend_lines, legend_labels, loc="upper right", fontsize=12)
-                st.pyplot(fig)
-                plt.close()
-        except Exception as e_corner:
-            st.error(f"Error generating corner plot: {e_corner}")
+                # Define a single color palette to be used for both corner & hist plots
+                palette_colors = ['#1f77b4',  # blue (original)
+                                '#d62728',  # red
+                                '#2ca02c',  # green
+                                '#ff7f0e',  # orange
+                                '#9467bd',  # purple
+                                '#8c564b',  # brown
+                                '#e377c2',  # pink
+                                '#17becf']  # cyan
 
-        # --- Log-PDF histogram (uses same toggles & colors) ---
-        st.subheader("Log PDF Comparison")
-        try:
-            finite_logpdf_values = logpdf_values[np.isfinite(logpdf_values)]
-            fig, ax = plt.subplots(figsize=(10, 6))
-
-            if show_original and finite_logpdf_values.size > 0:
-                ax.hist(finite_logpdf_values - finite_logpdf_values.mean(),
-                        density=True, bins=30, label="Original", alpha=0.9, color=palette_colors[0])
-
-            if show_morphs and len(selected_morphs_shared) > 0:
-                # fixed the typo here and iterate properly
+                # Map each displayed key (excluding original) to a color deterministically
+                morph_color_map = {}
                 for idx, key in enumerate(selected_morphs_shared):
-                    mdata = st.session_state.morph_data[key]
-                    morph_logpdf = mdata["logpdf"]
-                    finite_morph_logpdf = morph_logpdf[np.isfinite(morph_logpdf)]
-                    if finite_morph_logpdf.size == 0:
-                        continue
-                    label = "Reference" if key == "ref" else f"Morph {key}"
-                    color = morph_color_map.get(key, palette_colors[(idx + 1) % len(palette_colors)])
-                    ax.hist(finite_morph_logpdf - finite_morph_logpdf.mean(),
-                            density=True, bins=30, alpha=0.5,
-                            label=label, color=color)
+                    # +1 to reserve palette_colors[0] for original
+                    morph_color_map[key] = palette_colors[(idx + 1) % len(palette_colors)]
 
-            ax.set_xlabel("Log PDF (mean subtracted)")
-            ax.set_ylabel("Density")
-            ax.set_title("Log PDF Comparison")
-            ax.legend()
-            st.pyplot(fig)
-            plt.close()
-        except Exception as e_hist:
-            st.error(f"Error generating log-PDF comparison: {e_hist}")
+                # --- Corner plot (uses same toggles & unified contour levels) ---
+                st.subheader("Corner Plot Comparison")
+                try:
+                    # choose dims to plot (safe guard)
+                    data_plot = data[:, :plot_dims]
+                    labels_plot = param_names[:plot_dims]
+
+                    # Define unified contour levels (these are credible fractions used by corner)
+                    # Pick whichever set suits your needs; these are typical choices (50%, 75%, 95%)
+                    contour_levels = [0.5, 0.75, 0.95]
+
+                    fig = None
+                    if show_original:
+                        # Use palette_colors[0] for original
+                        fig = corner.corner(
+                            data_plot,
+                            labels=labels_plot,
+                            color=palette_colors[0],
+                            hist_kwargs={"density": True},
+                            show_titles=True,
+                            title_fmt=".2f",
+                            levels=contour_levels,
+                            fill_contours=True,
+                            plot_contours=True,
+                            smooth=1.0,
+                            contour_kwargs={"linewidths": 1.2}
+                        )
+
+                    if show_morphs and len(selected_morphs_shared) > 0:
+                        for idx, key in enumerate(selected_morphs_shared):
+                            # if user selected the original key accidentally (rare), skip - original is plotted separately above
+                            if key == "original" or key == "data":
+                                continue
+                            mdata = st.session_state.morph_data[key]
+                            m_samples_plot = mdata['samples'][:, :plot_dims]
+                            color = morph_color_map.get(key, palette_colors[(idx + 1) % len(palette_colors)])
+                            corner.corner(
+                                m_samples_plot,
+                                labels=labels_plot,
+                                fig=fig,
+                                color=color,
+                                hist_kwargs={"density": True},
+                                show_titles=True,
+                                title_fmt=".2f",
+                                levels=contour_levels,
+                                fill_contours=True,
+                                plot_contours=True,
+                                smooth=1.0,
+                                contour_kwargs={"linewidths": 1.2}
+                            )
+
+                    # legend
+                    legend_lines = []
+                    legend_labels = []
+                    if show_original:
+                        legend_lines.append(plt.Line2D([0], [0], color=palette_colors[0], lw=2))
+                        legend_labels.append("Original")
+                    if show_morphs:
+                        for key in selected_morphs_shared:
+                            color = morph_color_map.get(key)
+                            legend_lines.append(plt.Line2D([0], [0], color=color, lw=2))
+                            legend_labels.append("Reference" if key == "ref" else f"Morph {key}")
+
+                    if fig is not None:
+                        fig.legend(legend_lines, legend_labels, loc="upper right", fontsize=12)
+                        st.pyplot(fig)
+                        plt.close()
+                except Exception as e_corner:
+                    st.error(f"Error generating corner plot: {e_corner}")
+
+                # --- Log-PDF histogram (uses same toggles & colors) ---
+                st.subheader("Log PDF Comparison")
+                try:
+                    finite_logpdf_values = logpdf_values[np.isfinite(logpdf_values)]
+                    fig, ax = plt.subplots(figsize=(10, 6))
+
+                    if show_original and finite_logpdf_values.size > 0:
+                        ax.hist(finite_logpdf_values - finite_logpdf_values.mean(),
+                                density=True, bins=30, label="Original", alpha=0.9, color=palette_colors[0])
+
+                    if show_morphs and len(selected_morphs_shared) > 0:
+                        # fixed the typo here and iterate properly
+                        for idx, key in enumerate(selected_morphs_shared):
+                            mdata = st.session_state.morph_data[key]
+                            morph_logpdf = mdata["logpdf"]
+                            finite_morph_logpdf = morph_logpdf[np.isfinite(morph_logpdf)]
+                            if finite_morph_logpdf.size == 0:
+                                continue
+                            label = "Reference" if key == "ref" else f"Morph {key}"
+                            color = morph_color_map.get(key, palette_colors[(idx + 1) % len(palette_colors)])
+                            ax.hist(finite_morph_logpdf - finite_morph_logpdf.mean(),
+                                    density=True, bins=30, alpha=0.5,
+                                    label=label, color=color)
+
+                    ax.set_xlabel("Log PDF (mean subtracted)")
+                    ax.set_ylabel("Density")
+                    ax.set_title("Log PDF Comparison")
+                    ax.legend()
+                    st.pyplot(fig)
+                    plt.close()
+                except Exception as e_hist:
+                    st.error(f"Error generating log-PDF comparison: {e_hist}")
 
 
 
