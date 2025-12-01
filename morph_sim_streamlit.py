@@ -539,7 +539,7 @@ if st.session_state.data is not None:
             with col_a:
                 morph_orders = st.multiselect(
                     "Select Morph Orders",
-                    [1, 2, 3, 4, 5, 6],
+                    [1, 2, 3, 4, 5, 6,7,8,9,10],
                     default=[1, 2, 3],
                     key="ui_morph_orders"
                 )
