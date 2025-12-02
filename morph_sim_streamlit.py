@@ -128,7 +128,7 @@ class TunableCopulaSimulation:
         
         return f"Added Factor [{dist_name}]: {dim} vars | Strength={corr_strength if corr_strength is not None else 'Random'}"
 
-    def generate_random_problem(self, target_dim):
+    def generate_random_problem(self, target_dim,max_block):
         """
         Automatically generates a random high-dimensional problem.
         It partitions the target_dim into random blocks and assigns random distributions and parameters.
@@ -141,7 +141,8 @@ class TunableCopulaSimulation:
 
         while remaining_dim > 0:
             # Determine block size (random between 1 and remaining, capped at 5 for variety)
-            max_block = min(remaining_dim, 5)
+            max_block = min(remaining_dim, max_block)
+
             block_dim = np.random.randint(1, max_block + 1) if max_block > 1 else 1
             
             # Pick a distribution
@@ -149,7 +150,7 @@ class TunableCopulaSimulation:
             
             # Pick correlation strength (randomly either None or a float)
             use_corr = np.random.choice([True, False])
-            corr_strength = np.random.uniform(0.1, 0.9) if use_corr else None
+            corr_strength = np.random.uniform(0.3, 0.9) if use_corr else None
             
             # Generate Random Params
             params = []
@@ -327,6 +328,8 @@ st.sidebar.markdown("---")
 if setup_mode == "Random Auto-Generation":
     st.sidebar.subheader("🎲 Auto-Generate Problem")
     target_dims = st.sidebar.number_input("Total Dimensions", min_value=2, max_value=100, value=10, step=1)
+    max_block = st.sidebar.number_input("Max order of correlation", min_value=2, max_value=7, value=4, step=1)
+
     
     if st.sidebar.button("⚡ Generate Random Problem"):
         try:
@@ -339,7 +342,7 @@ if setup_mode == "Random Auto-Generation":
             st.session_state.morph_logpdf_on_original = {}
             
             # Generate
-            logs = st.session_state.sim.generate_random_problem(target_dims)
+            logs = st.session_state.sim.generate_random_problem(target_dims,max_block=max_block)
             st.session_state.factors_added = logs
             st.success(f"Generated {target_dims}-dimensional problem with {len(logs)} factors!")
             st.rerun()
@@ -601,7 +604,7 @@ if st.session_state.data is not None:
                                             st.session_state.sim.logpdf,
                                             n_resamples=2,
                                             morph_type="indep",
-                                            kde_bw="silverman",
+                                            kde_bw="isj",
                                             param_names=param_names,
                                             output_path=output_dir
                                         )
